@@ -1,7 +1,13 @@
+import random
+
 import numpy as np
 from numpy import linalg as la
 import matplotlib.pyplot as plt
-from ExtendedKalmanFilter import ExtendedKalmanFilter
+from scipy import signal
+
+import ExtendedKalmanFilter
+from ExtendedKalmanFilter import *
+
 
 # SOC Estimation
 class UnscentedKalmanFilter:
@@ -13,6 +19,7 @@ class UnscentedKalmanFilter:
     y_matrix = np.zeros(5)
     S = 0  # Pyy
     T = np.zeros((2, 1))  # Pxy
+    z = 0
 
     mean_weights = np.zeros(2 * len(x) + 1)
     cov_weights = np.zeros(2 * len(x) + 1)
@@ -24,45 +31,53 @@ class UnscentedKalmanFilter:
     H = np.zeros((1, 2))  # measurement transition matrix
     K = np.zeros((2, 1))  # Kalman Gain
 
-    def __init__(self, dt, tau, Cp, eta, r0, r1, initial_sigma, w_sigma, v_sigma):
+    def __init__(self, dt, SOC, tau, Cp, eta, r0, initial_sigma, w_sigma, v_sigma):
         self.dt = dt  # init
+        self.x[0] = SOC
         self.F = np.array([  # init state transition matrix
             [1, 0],
             [0, np.exp(-dt / tau)]
         ])
-        self.B = np.array(  # init control input matrix
-            [[-eta * dt / Cp], [r1 * (1 - np.exp(-dt / tau))]]
+        self.B = lambda x: np.array(
+            [-eta * dt / Cp, R1(x * 100) * (1 - np.exp(-dt / tau))]
         )
 
         np.fill_diagonal(self.Q, w_sigma)  # init process noise covariance matrix
+        self.Q[0][0] /= 10
         np.fill_diagonal(self.R, v_sigma)  # init measurement noise covariance matrix
 
-        self.H = np.array([1, -1]).reshape((1, 2))
-        self.D = r0
+        self.H = lambda x: np.array([OCV()(x * 100), -1]).reshape((1, 2))
+        self.D = -r0
 
         np.fill_diagonal(self.P, initial_sigma)  # init state covariance matrix
-        self.x = np.random.multivariate_normal(  # random state with multivariate distribution P
-            (1.0, 12.7),
-            self.P
-        ).T
+        self.P[0][0] /= 10
 
     def predict(self, u):
-        self.sigma_matrix, self.mean_weights, self.cov_weights = self.unscented_transform(self.x, self.P, 1, 0, 1)
-        self.sigma_matrix = np.matmul(self.F, self.sigma_matrix) + np.matmul(self.B, np.full((1, 5), u))
+        self.sigma_matrix, self.mean_weights, self.cov_weights = self.unscented_transform(self.x, self.P, 1, 2, 1)
+
+        for i in range(0, 2 * len(self.x) + 1):
+            self.sigma_matrix[i] = np.matmul(self.F, self.sigma_matrix[i]) + self.B(self.x[0]) * u
+
         x_pred = np.zeros(2).T
         for i in range(0, 2 * len(self.x) + 1):
-            x_pred += self.mean_weights[i] * self.sigma_matrix.T[i]
+            x_pred += self.mean_weights[i] * self.sigma_matrix[i]
 
         P_pred = np.zeros((2, 2))
         P_pred += self.Q
         for i in range(0, 2 * len(self.x) + 1):
-            r = self.sigma_matrix.T[i] - x_pred
+            r = self.sigma_matrix[i] - x_pred
             P_pred += self.cov_weights[i] * np.matmul(r, r.T)
         return x_pred, P_pred
 
-    def add_measurement(self, x_measurement, P_pred):
-        chi, wm, wc = self.unscented_transform(x_measurement, P_pred, 1, 0, 1)
-        self.y_matrix = np.matmul(self.H, chi).reshape(5)
+    def add_measurement(self, x, P_pred, u):
+        v = np.random.normal(
+            0,
+            self.R
+        )
+        chi, wm, wc = self.unscented_transform(x, P_pred, 1, 2, 1)
+        for i in range(0, 2 * len(self.x) + 1):
+            self.y_matrix[i] = np.matmul(self.H(x[0]).reshape((2,)), chi[i]) + self.D * u + v
+        self.z = self.y_matrix[0]
         self.y = 0
         for i in range(0, 2 * len(self.x) + 1):
             self.y += wm[i] * self.y_matrix[i]
@@ -72,12 +87,12 @@ class UnscentedKalmanFilter:
             self.S += wc[i] * (self.y_matrix[i] - self.y) ** 2
         self.T = np.zeros((2, 1))
         for i in range(0, 2 * len(self.x) + 1):
-            self.T += (wc[i] * (chi.T[i] - self.x) * (self.y_matrix[i] - self.y)).reshape((2, 1))
+            self.T += (wc[i] * (chi[i] - self.x) * (self.y_matrix[i] - self.y)).reshape((2, 1))
 
     def correct(self, x_pred, P_pred):
         self.K = np.matmul(self.T, np.linalg.inv(self.S))
 
-        x_correction = np.matmul(self.K, self.y - (np.matmul(self.H, self.x)))
+        x_correction = (self.K.T * (self.z - self.y)).reshape((2,))
         P_correction = np.matmul(self.K * self.S, self.K.T)
 
         self.x = x_pred + x_correction
@@ -89,78 +104,32 @@ class UnscentedKalmanFilter:
         mean_weights = np.zeros(2 * L + 1)
         cov_weights = np.zeros(2 * L + 1)
 
-        scaling_factor = a**2 * (L + k) - L
+        scaling_factor = a ** 2 * (L + k) - L
 
         chi[0] = state
         mean_weights[0] = scaling_factor / (L + scaling_factor)
         cov_weights[0] = mean_weights[0]
+        U, S, _ = la.svd(cov)
         for i in range(1, 2 * L + 1):
             mean_weights[i] = 1 / (2 * (L + scaling_factor))
             cov_weights[i] = 1 / (2 * (L + scaling_factor))
-            cov = nearestPD((L + scaling_factor) * cov)
             if i <= L:
-                chi[i] = state + np.linalg.cholesky(cov)[i - 1]
+                chi[i] = state + (np.sqrt(L + scaling_factor) * U * np.sqrt(S))[i - 1]
             else:
-                chi[i] = state - np.linalg.cholesky(cov)[i - L - 1]
+                chi[i] = state - (np.sqrt(L + scaling_factor) * U * np.sqrt(S))[i - L - 1]
 
-        return chi.T, mean_weights, cov_weights
+        # print(chi)
+        # print(mean_weights)
+        # print(cov_weights)
 
-
+        return chi, mean_weights, cov_weights
 
     def get_latest(self):
         return self.x
 
-def nearestPD(A):
-    """Find the nearest positive-definite matrix to input
-
-    A Python/Numpy port of John D'Errico's `nearestSPD` MATLAB code [1], which
-    credits [2].
-
-    [1] https://www.mathworks.com/matlabcentral/fileexchange/42885-nearestspd
-
-    [2] N.J. Higham, "Computing a nearest symmetric positive semidefinite
-    matrix" (1988): https://doi.org/10.1016/0024-3795(88)90223-6
-    """
-
-    B = (A + A.T) / 2
-    _, s, V = la.svd(B)
-
-    H = np.dot(V.T, np.dot(np.diag(s), V))
-
-    A2 = (B + H) / 2
-
-    A3 = (A2 + A2.T) / 2
-
-    if isPD(A3):
-        return A3
-
-    spacing = np.spacing(la.norm(A))
-    # The above is different from [1]. It appears that MATLAB's `chol` Cholesky
-    # decomposition will accept matrixes with exactly 0-eigenvalue, whereas
-    # Numpy's will not. So where [1] uses `eps(mineig)` (where `eps` is Matlab
-    # for `np.spacing`), we use the above definition. CAVEAT: our `spacing`
-    # will be much larger than [1]'s `eps(mineig)`, since `mineig` is usually on
-    # the order of 1e-16, and `eps(1e-16)` is on the order of 1e-34, whereas
-    # `spacing` will, for Gaussian random matrixes of small dimension, be on
-    # othe order of 1e-16. In practice, both ways converge, as the unit test
-    # below suggests.
-    I = np.eye(A.shape[0])
-    k = 1
-    while not isPD(A3):
-        mineig = np.min(np.real(la.eigvals(A3)))
-        A3 += I * (-mineig * k**2 + spacing)
-        k += 1
-
-    return A3
-
-
-def isPD(B):
-    """Returns true when input is positive-definite, via Cholesky"""
-    try:
-        _ = la.cholesky(B)
-        return True
-    except la.LinAlgError:
-        return False
+    def get_output(self):
+        p = OCV()
+        return p(self.x[0] * 100) - self.x[1] - self.u * self.D
 
 
 class Environment():
@@ -168,91 +137,138 @@ class Environment():
     x_actual = np.zeros(2).T
     x_hat_UKF = np.zeros(2).T
     x_hat_EKF = np.zeros(2).T
-    u = np.zeros(1).T
-
-    fig, ((axis1, axis2), (axis3, axis4)) = plt.subplots(2, 2)
+    u = 0
 
     def __init__(self):
         # control signal pa rams
         self.freq = 100  # samples
-        self.total_time = 5  # seconds
+        self.total_time = 50  # seconds
         self.t = np.linspace(0, self.total_time, self.freq, False)
-        self.current = np.zeros(self.t.shape)
+        self.current = 1 * np.ones(self.t.shape)
+        for i in range(1, 5):
+            for _ in range(0, i * 2):
+                rand = random.randrange(2, 98)
+                self.current[rand + 2] = i
+                self.current[rand + 1] = i
+                self.current[rand] = i
+                self.current[rand - 1] = i
+                self.current[rand - 2] = i
 
-        # Kalman Filter
-        init_pos_sigma = .00001
-        process_sigma = .05
-        meas_sigma = .05
+        # Kalman Filter consts
+        init_pos_sigma = .01
+        process_sigma = .000025
+        meas_sigma = .001
+
+        # System consts
+        self.tau = 1
+        self.Cp = 150
+        self.eta = 1.0
+        self.r0 = .001
+        SOC = 1.0
+
         self.dt = self.total_time / self.freq
-        self.UKF = UnscentedKalmanFilter(self.dt, 1, 300, 1., 1, 1, init_pos_sigma, process_sigma, meas_sigma)
-        self.EKF = ExtendedKalmanFilter(self.dt, 1, 300, 1., 1, 1, init_pos_sigma, process_sigma, meas_sigma)
+        self.UKF = UnscentedKalmanFilter(
+            self.dt, SOC, self.tau, self.Cp, self.eta,
+            self.r0, init_pos_sigma, process_sigma, meas_sigma)
+        self.EKF = ExtendedKalmanFilter(
+            self.dt, SOC, self.tau, self.Cp, self.eta,
+            self.r0, init_pos_sigma, process_sigma, meas_sigma)
         self.x_actual = self.UKF.get_latest()
 
         # output signals
         self.state_true = []
         self.state_est_UKF = []
         self.state_est_EKF = []
+        self.output_true = []
+        self.output_EKF = []
+        self.output_UKF = []
+        self.err_UKF = []
+        self.err_EKF = []
 
     def run(self):
-        if self.x_actual[0] > 0.0:
-            for n in range(0, self.freq):
-                print(self.x_actual[0])
-                u = self.current[n]
-                process_noise = np.random.multivariate_normal(
-                    (0, 0),
-                    self.UKF.Q
-                ).T
+        for n in range(0, self.freq):
+            u = self.current[n]
+            process_noise = np.random.multivariate_normal(
+                (0, 0),
+                self.UKF.Q
+            ).T
 
-                self.x_actual = (np.matmul(self.UKF.F, self.x_actual) + self.UKF.B.T * u + process_noise).reshape((2,))
-                x_pred, P_pred = self.UKF.predict(u)
-                self.UKF.add_measurement(self.x_actual, P_pred)
-                self.UKF.correct(x_pred, P_pred)
-                self.x_hat_UKF = self.UKF.get_latest()
+            self.x_actual = (np.matmul(self.UKF.F, self.x_actual)
+                             + self.UKF.B(self.x_actual[0]) * u + process_noise).reshape((2,))
+            self.x_actual[0] = min(1.0, max(0.01, self.x_actual[0]))
 
-                x_pred, P_pred = self.EKF.predict(u)
-                self.EKF.add_measurement(self.x_actual, u)
-                self.EKF.correct(x_pred, P_pred)
-                self.x_hat_EKF = self.EKF.get_latest()
+            x_pred, P_pred = self.UKF.predict(u)
+            self.UKF.add_measurement(self.x_actual, P_pred, u)
+            self.UKF.correct(x_pred, P_pred)
+            self.x_hat_UKF = self.UKF.get_latest()
 
-                self.state_true.append(self.x_actual.T)
-                self.state_est_UKF.append(self.x_hat_UKF.T)
-                self.state_est_EKF.append(self.x_hat_EKF.T)
+            x_pred, P_pred = self.EKF.predict(u)
+            self.EKF.add_measurement(self.x_actual, u)
+            self.EKF.correct(x_pred, P_pred, u)
+            self.x_hat_EKF = self.EKF.get_latest()
 
-        else:
-            pass
+            self.state_true.append(self.x_actual.T)
+            self.state_est_UKF.append(self.x_hat_UKF.T)
+            self.state_est_EKF.append(self.x_hat_EKF.T)
 
+            p = OCV()
+            out = p(self.x_actual[0] * 100) - self.x_actual[1] - u * self.r0
+            self.output_true.append(out)
+            self.output_UKF.append(self.UKF.get_output())
+            self.output_EKF.append(self.EKF.get_output())
 
         self.state_true = np.array(self.state_true).T
         self.state_est_UKF = np.array(self.state_est_UKF).T
         self.state_est_EKF = np.array(self.state_est_EKF).T
+        self.err_UKF = np.abs(self.state_est_UKF - self.state_true)
+        self.err_EKF = np.abs(self.state_est_EKF - self.state_true)
 
-        # UKF SOC
-        self.axis1.plot(self.t, self.state_true[0], label="true")
-        self.axis1.plot(self.t, self.state_est_UKF[0], label="estimation")
-        self.axis1.set_title('SOC')
+        # SOC
+        # plt.plot(self.t, self.state_true[0], label="true")
+        # plt.plot(self.t, self.err_UKF[0], label="UKF")
+        # plt.plot(self.t, self.err_EKF[0], label="EKF")
+        # plt.title("Error")
+        # plt.xlabel("t (s)")
+        # plt.ylabel("SOC Estimation Error")
+        ax1 = plt.subplot()
 
-        # UKF TV
-        self.axis2.plot(self.t, self.state_true[1], label="true")
-        self.axis2.plot(self.t, self.state_est_UKF[1], label="estimation")
-        self.axis2.set_title('Terminal Voltage')
+        title_font = {'fontname': 'Arial', 'size': '18', 'color': 'black', 'weight': 'normal',
+                      'verticalalignment': 'center'}  # Bottom vertical alignment for more space
+        axis_font = {'fontname': 'Arial', 'size': '16'}
 
-        # EKF SOC
-        self.axis3.plot(self.t, self.state_true[0], label="true")
-        self.axis3.plot(self.t, self.state_est_EKF[0],  label="estimation")
-        self.axis1.set_title('SOC')
+        # plt.plot(self.t, self.output_true, label="true")
+        # plt.plot(self.t, self.output_UKF, label="UKF")
+        plt.plot(self.t, self.current)
+        plt.xlabel("t (s)", **axis_font)
+        plt.title("Current", **title_font)
+        plt.ylabel("I (A)", **axis_font)
+        for label in (ax1.get_xticklabels() + ax1.get_yticklabels()):
+            label.set_fontsize(18)
+        plt.subplots_adjust(bottom=0.13)
+        plt.subplots_adjust(right=0.95)
+        plt.rcParams.update({'font.size': 16})
 
-        # EKF
-        self.axis4.plot(self.t, self.state_true[1], label="true")
-        self.axis4.plot(self.t, self.state_est_EKF[1], label="estimation")
-        self.axis2.set_title('Terminal Voltage')
+        # # U1
+        # self.axis2.plot(self.t, self.state_true[1], label="true")
+        # self.axis2.plot(self.t, self.state_est_UKF[1], label="UKF")
+        # self.axis2.plot(self.t, self.state_est_EKF[1], label="EKF")
+        # self.axis2.set_title('U1')
+        #
+        # # Ut
+        # self.axis3.plot(self.t, self.output_true, label="true")
+        # self.axis3.plot(self.t, self.output_UKF, label="UKF")
+        # self.axis3.plot(self.t, self.output_EKF, label="EKF")
+        # self.axis3.set_title('Ut')
+        #
+        # self.axis1.plot(self.t, self.err_UKF[0], label="UKF")
+        # self.axis1.plot(self.t, self.err_EKF[0], label="EKF")
+        # # self.axis1.plot(self.state_true[0], self.output_true, label="OCV-SOC")
+        # self.axis1.set_title('Error')
 
-        plt.legend(loc='upper left')
-        plt.tight_layout()
+        # plt.legend(loc='upper right')
         plt.show()
 
 
 if __name__ == "__main__":
     env = Environment()
     env.run()
-
-
