@@ -132,7 +132,7 @@ class UnscentedKalmanFilter:
         return p(self.x[0] * 100) - self.x[1] - self.u * self.D
 
 
-class Environment():
+class Environment:
     # ground truth and estimation states
     x_actual = np.zeros(2).T
     x_hat_UKF = np.zeros(2).T
