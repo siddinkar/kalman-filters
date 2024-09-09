@@ -77,9 +77,9 @@ class UTC:
         ])
         self.B = np.linalg.inv(self.A) @ (self.A - np.eye(3)) @ self.B
 
-        self.x = np.array([200000,200000, 200000])
+        self.x = np.array([2,2, 2])
 
-        self.f_xk = np.clip(np.random.rand(1000, 3) * f_bar, -f_bar, f_bar)
+        self.f_xk = np.clip(np.random.rand(10000, 3) * f_bar, -f_bar, f_bar)
 
         first = (np.eye(3) - self.B @ self.K) @ self.A
         sec = (np.eye(3) - self.B @ self.K) @ self.B
@@ -109,7 +109,7 @@ class UTC:
         self.Puy = np.zeros((4, 3))
         for i in range(0, 2 * len(self.u) + 1):
             # Y_i
-            self.sigma_matrix[i] = np.matmul(self.A, self.x) + np.matmul(self.B, self.U[i])
+            self.sigma_matrix[i] = np.matmul(self.A, self.x) + np.matmul(self.B, self.U[i]) + np.array([np.sin((n)/200.0) * self.f_bar]*3)
 
         for i in range(0, 2 * len(self.u) + 1):
             # x_pred
@@ -125,7 +125,6 @@ class UTC:
             self.Py += self.weights[i] * np.matmul(r2, r2.T)
             # Pxy
             self.Puy += self.weights[i] * np.matmul(r1, r2.T)
-
         return x_pred, U_pred, P_pred
 
     def update(self, x_ref, n):
@@ -138,9 +137,8 @@ class UTC:
 
         self.u = self.clamp_input(U_pred + U_correction)
         self.P = P_pred - P_correction
-
-        d = self.f_bar#np.array([np.sin(n/20.0) * self.f_bar, self.f_bar * np.cos(n / 10.0), self.f_bar * np.sin(n / 50.0)])
-        self.x = np.matmul(self.A, self.x) + self.B @ self.u + self.f_xk[n]#np.array([np.sin(n/20.0) * self.f_bar]*3)#self.f_xk[n]
+        print(np.array([np.sin(n/200.0) * self.f_bar]*3))
+        self.x = np.matmul(self.A, self.x) + self.B @ self.u + np.array([np.sin(n/200.0) * self.f_bar]*3)
         self.Z = np.block([
             [(np.eye(3) - self.B @ self.K) @ self.A, (np.eye(3) - self.B @ self.K) @ self.B],
             [-self.K @ self.A, (np.eye(4) - self.K @ self.B)]
@@ -150,15 +148,15 @@ class UTC:
         for i in range(len(eig)):
             eig[i] = eig[i].real
         self.pmax = max(eig)
-        print(self.pmax)
 
 
     def clamp_input(self, u):
-        uc = max(-(25/180) * math.pi, min((55/180) * math.pi, u[0]))
-        ure = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[1]))
-        ule = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[2]))
-        ur = max(-(30 / 180) * math.pi, min((30 / 180) * math.pi, u[3]))
-        return np.array([uc, ure, ule, ur])
+        # uc = max(-(25/180) * math.pi, min((55/180) * math.pi, u[0]))
+        # ure = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[1]))
+        # ule = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[2]))
+        # ur = max(-(30 / 180) * math.pi, min((30 / 180) * math.pi, u[3]))
+        # return np.array([uc, ure, ule, ur])
+        return u
 
 class Environment:
     # ground truth and estimation states
@@ -167,12 +165,12 @@ class Environment:
 
     def __init__(self):
         # control signal pa rams
-        self.freq = 1000  # samples
-        self.total_time = 100  # seconds
+        self.freq = 10000  # samples
+        self.total_time = 1000  # seconds
         self.t = np.linspace(0, self.total_time, self.freq, False)
-        self.ref = np.array([np.cos(self.t/5.0) * np.exp(-self.t / 25.0) * 2.0,
-                    np.sin(self.t / 3.5) * np.exp(self.t/50.0),
-                    np.cos(self.t / 1.5) * np.exp(-self.t / 25.0)]).T
+        self.ref = np.array([np.cos(self.t/50.0)*0.5,
+                    np.sin(self.t / 32.5)*0.5,
+                    np.cos(self.t / 10.5)*0.5]).T
         init_pos_sigma = 1.0
 
         # System consts
@@ -180,11 +178,12 @@ class Environment:
         init_u = np.array([0, 0, 0, 0])
 
         self.dt = self.total_time / self.freq
-        self.UTC = UTC(self.dt, init_u, 1.57, init_pos_sigma)
 
         self.x_act_series = []
+        self.x_norm = []
         self.error = []
         self.yk = []
+        self.ref_norm = []
 
         self.avg_error = []
         self.bound = []
@@ -192,7 +191,7 @@ class Environment:
     def run(self):
         init_u = np.array([0, 0, 0, 0])
         init_pos_sigma = 1.0
-        self.UTC = UTC(self.dt, init_u, 0.5, init_pos_sigma)
+        self.UTC = UTC(self.dt, init_u, 0.25, init_pos_sigma)
         for n in range(0, self.freq):
 
             self.x_ref = self.ref[n]
@@ -202,35 +201,42 @@ class Environment:
             R = self.UTC.f_bar * (np.linalg.norm(self.UTC.Z) * self.UTC.pmax + np.sqrt(np.linalg.norm(self.UTC.Z)**2 * self.UTC.pmax**2 + self.UTC.pmax))
             self.bound.append(R)
             self.x_act_series.append(self.x_actual)
+            self.x_norm.append(np.linalg.norm(self.x_actual))
+            self.ref_norm.append(np.linalg.norm(self.ref[n]))
             self.yk.append(np.linalg.norm(np.concatenate((self.x_actual, self.UTC.u))))
-            self.error.append(np.linalg.norm(self.x_actual - self.ref[n], 2))
-
+            #self.error.append(np.linalg.norm(self.x_actual - self.ref[n]))
+            self.error.append(np.linalg.norm(self.x_actual) - np.linalg.norm(self.ref[n]))
 
             #self.avg_error.append(np.average(self.error, axis=0, keepdims=True))
         # self.bound = [np.min(self.bound)] * 1000
 
 
-        # self.x_act_series = np.array(self.x_act_series).T
-        # self.error = np.array(self.error).T
+        self.x_act_series = np.array(self.x_act_series).T
+        self.error = np.array(self.error).T
+        self.x_norm = np.array(self.x_norm).T
+        self.ref_norm = np.array(self.ref_norm).T
 
+        #np.savetxt("error1.txt", self.error)
+        error1 = np.loadtxt("./error1.txt")
 
         title_font = {'fontname': 'Arial', 'size': '18', 'color': 'black', 'weight': 'normal',
                       'verticalalignment': 'center'}
         axis_font = {'fontname': 'Arial', 'size': '16'}
-        #plt.plot(self.t, self.ref.T[0], label="Ref p")
+        # plt.plot(self.t, self.ref.T[0], label="Ref p")
         # plt.plot(self.t, self.ref.T[1], label="Ref q")
         # plt.plot(self.t, self.ref.T[2], label="Ref r")
         # plt.plot(self.t, self.x_act_series[0], label="True p")
         # plt.plot(self.t, self.x_act_series[1], label="True q")
         # plt.plot(self.t, self.x_act_series[2], label="True r")
         # plt.plot(np.linspace(0, 2.0, 50), self.avg_error, label="error")
-        plt.plot(self.t, self.yk, label="y_k")
-        # plt.plot(self.t, self.bound, label="bound")
+        #plt.plot(self.t, self.x_norm, label="Actual")
+        plt.plot(self.t, self.error, label="Error (NL Prediction)")
+        plt.plot(self.t, error1, label="Error (w/o NL Prediction)")
         plt.xlabel("T(s)", **axis_font)
-        plt.title("", **title_font)
-        plt.ylabel("|y_k|", **axis_font)
+        plt.title("State Tracking", **title_font)
+        plt.ylabel("|x|", **axis_font)
         plt.legend(loc='upper right')
-        plt.savefig("fig1.png")
+        plt.savefig("no_disturbance.png")
         plt.show()
 
 
