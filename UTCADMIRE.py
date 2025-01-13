@@ -42,7 +42,7 @@ class UTC:
     Q = 0
     K = np.zeros((4, 3))  # Kalman Gain
 
-    def __init__(self, dt, u, f_bar, initial_sigma):
+    def __init__(self, dt, u, f_bar, step, initial_sigma):
         self.dt = dt  # init
         # Derivative discretization
         # self.A = np.array([  # discretized (A * dt + I)
@@ -52,6 +52,7 @@ class UTC:
         # ]) * dt + np.eye(3)
         # print(self.A)
         self.f_bar = f_bar
+        self.step = step
 
         # Better Discretization
         self.A = np.array(scipy.linalg.expm(np.array([  # discretized (A * dt + I)
@@ -79,7 +80,7 @@ class UTC:
 
         self.x = np.array([2,2, 2])
 
-        self.f_xk = np.clip(np.random.rand(10000, 3) * f_bar, -f_bar, f_bar)
+        self.f_xk = np.clip((np.random.rand(10000, 3) * f_bar) - (f_bar/2), -f_bar, f_bar)
 
         first = (np.eye(3) - self.B @ self.K) @ self.A
         sec = (np.eye(3) - self.B @ self.K) @ self.B
@@ -102,14 +103,25 @@ class UTC:
         #self.u += np.random.normal(0, self.Q)
         self.U, self.weights = unscented_transform(self.u, self.P)
 
+        A1 = matrix_exp(self.A, self.step)
+        A_n = [np.eye(3)]
+        for i in range(1, self.step):
+            A_n.append(A_n[-1] + matrix_exp(self.A, i))
+
+
         x_pred = np.zeros(3)
         U_pred = np.zeros(4)
         P_pred = np.eye(4) * self.Q
         self.Py = 0.001 * np.eye(3)
         self.Puy = np.zeros((4, 3))
+        nl = np.zeros(3)
+        for i in range(self.step):
+            #nl += A_n[self.step - 1 - i] @ (np.array([np.sin((n + i)/200.0) * self.f_bar]*3))
+            nl += matrix_exp(self.A, self.step - i - 1) @ self.f_xk[n+i]#+= matrix_exp(self.A, self.step - i - 1) @ (np.array([np.sin((n + i) / 200.0) * self.f_bar] * 3)) #+= matrix_exp(self.A, self.step - i - 1) @ self.f_xk[n+i]
         for i in range(0, 2 * len(self.u) + 1):
             # Y_i
-            self.sigma_matrix[i] = np.matmul(self.A, self.x) + np.matmul(self.B, self.U[i]) + np.array([np.sin((n)/200.0) * self.f_bar]*3)
+            self.sigma_matrix[i] = np.matmul(A1, self.x) + A_n[self.step - 1] @ np.matmul(self.B, self.U[i])
+            self.sigma_matrix[i] += nl
 
         for i in range(0, 2 * len(self.u) + 1):
             # x_pred
@@ -125,6 +137,8 @@ class UTC:
             self.Py += self.weights[i] * np.matmul(r2, r2.T)
             # Pxy
             self.Puy += self.weights[i] * np.matmul(r1, r2.T)
+            print(np.linalg.norm(r1))
+            print(np.linalg.norm(r2))
         return x_pred, U_pred, P_pred
 
     def update(self, x_ref, n):
@@ -135,10 +149,9 @@ class UTC:
         U_correction = np.matmul(self.K, (x_ref - x_pred))
         P_correction = self.K @ self.Py @ self.K.T
 
-        self.u = self.clamp_input(U_pred + U_correction)
+        self.u = (U_pred + U_correction)
         self.P = P_pred - P_correction
-        print(np.array([np.sin(n/200.0) * self.f_bar]*3))
-        self.x = np.matmul(self.A, self.x) + self.B @ self.u + np.array([np.sin(n/200.0) * self.f_bar]*3)
+        self.x = np.matmul(self.A, self.x) + self.B @ self.u + self.f_xk[n]#+ np.array([np.sin(n/200.0) * self.f_bar]*3)
         self.Z = np.block([
             [(np.eye(3) - self.B @ self.K) @ self.A, (np.eye(3) - self.B @ self.K) @ self.B],
             [-self.K @ self.A, (np.eye(4) - self.K @ self.B)]
@@ -150,14 +163,6 @@ class UTC:
         self.pmax = max(eig)
 
 
-    def clamp_input(self, u):
-        # uc = max(-(25/180) * math.pi, min((55/180) * math.pi, u[0]))
-        # ure = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[1]))
-        # ule = max(-(25 / 180) * math.pi, min((25 / 180) * math.pi, u[2]))
-        # ur = max(-(30 / 180) * math.pi, min((30 / 180) * math.pi, u[3]))
-        # return np.array([uc, ure, ule, ur])
-        return u
-
 class Environment:
     # ground truth and estimation states
     x_ref = np.zeros(2).T
@@ -165,8 +170,8 @@ class Environment:
 
     def __init__(self):
         # control signal pa rams
-        self.freq = 10000  # samples
-        self.total_time = 1000  # seconds
+        self.freq = 1000  # samples
+        self.total_time = 200  # seconds
         self.t = np.linspace(0, self.total_time, self.freq, False)
         self.ref = np.array([np.cos(self.t/50.0)*0.5,
                     np.sin(self.t / 32.5)*0.5,
@@ -191,10 +196,14 @@ class Environment:
     def run(self):
         init_u = np.array([0, 0, 0, 0])
         init_pos_sigma = 1.0
-        self.UTC = UTC(self.dt, init_u, 0.25, init_pos_sigma)
+        step = 20
+        self.UTC = UTC(self.dt, init_u, 0.1, step, init_pos_sigma)
         for n in range(0, self.freq):
 
-            self.x_ref = self.ref[n]
+            if n+step-1 < self.freq:
+                self.x_ref = self.ref[n + step - 1]
+            else:
+                self.x_ref = self.ref[-1]
 
             self.UTC.update(self.x_ref, n)
             self.x_actual = self.UTC.x
@@ -205,19 +214,20 @@ class Environment:
             self.ref_norm.append(np.linalg.norm(self.ref[n]))
             self.yk.append(np.linalg.norm(np.concatenate((self.x_actual, self.UTC.u))))
             #self.error.append(np.linalg.norm(self.x_actual - self.ref[n]))
-            self.error.append(np.linalg.norm(self.x_actual) - np.linalg.norm(self.ref[n]))
+            self.error.append(np.linalg.norm(self.x_actual - self.ref[n]))
 
-            #self.avg_error.append(np.average(self.error, axis=0, keepdims=True))
+            self.avg_error.append(np.average(self.error, axis=0, keepdims=True))
         # self.bound = [np.min(self.bound)] * 1000
 
 
         self.x_act_series = np.array(self.x_act_series).T
         self.error = np.array(self.error).T
+        self.avg_error = np.array(self.avg_error)
         self.x_norm = np.array(self.x_norm).T
         self.ref_norm = np.array(self.ref_norm).T
 
-        #np.savetxt("error1.txt", self.error)
-        error1 = np.loadtxt("./error1.txt")
+        #np.savetxt("error2.txt", self.error)
+        error = np.loadtxt("./error2.txt")
 
         title_font = {'fontname': 'Arial', 'size': '18', 'color': 'black', 'weight': 'normal',
                       'verticalalignment': 'center'}
@@ -228,17 +238,23 @@ class Environment:
         # plt.plot(self.t, self.x_act_series[0], label="True p")
         # plt.plot(self.t, self.x_act_series[1], label="True q")
         # plt.plot(self.t, self.x_act_series[2], label="True r")
-        # plt.plot(np.linspace(0, 2.0, 50), self.avg_error, label="error")
-        #plt.plot(self.t, self.x_norm, label="Actual")
-        plt.plot(self.t, self.error, label="Error (NL Prediction)")
-        plt.plot(self.t, error1, label="Error (w/o NL Prediction)")
+        # plt.plot(np.linspace(0, 100, 1000), self.avg_error, label="error")
+        plt.plot(self.t, self.x_norm, label="Actual")
+        plt.plot(self.t, self.error, label="Error")
+        plt.plot(self.t, self.ref_norm, label="Reference")
         plt.xlabel("T(s)", **axis_font)
         plt.title("State Tracking", **title_font)
         plt.ylabel("|x|", **axis_font)
+        # plt.axis([-10, 200, 0, 4])
         plt.legend(loc='upper right')
-        plt.savefig("no_disturbance.png")
+        plt.savefig("Random-Nonlinearity.png")
         plt.show()
 
+def matrix_exp(input, n):
+    A_N = np.eye(3)
+    for i in range(n):
+        A_N = np.matmul(A_N, input)
+    return A_N
 
 if __name__ == "__main__":
     env = Environment()
